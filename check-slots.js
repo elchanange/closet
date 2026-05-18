@@ -625,6 +625,9 @@ async function sendLifeSignal(scheduledDate, earliestSlot, availableSlots) {
   const localTime = getLifeSignalTime();
   const transporter = createEmailTransporter();
   const earliestSlotText = earliestSlot ? fmtDate(earliestSlot) : 'No available slots were parsed';
+  const earlierSlots = availableSlots.filter(slot => slot < scheduledDate);
+  const today = getTodayInTimeZone();
+  const checkedThrough = scheduledDate > today ? scheduledDate : today;
 
   await transporter.sendMail({
     from: `"Chili Slot Checker" <${SMTP_USER}>`,
@@ -648,8 +651,12 @@ async function sendLifeSignal(scheduledDate, earliestSlot, availableSlots) {
             <td style="padding:8px 0;font-weight:600">${earliestSlotText}</td>
           </tr>
           <tr>
-            <td style="padding:8px 0;color:#666">Available dates parsed:</td>
-            <td style="padding:8px 0;font-weight:600">${availableSlots.length}</td>
+            <td style="padding:8px 0;color:#666">Earlier dates found:</td>
+            <td style="padding:8px 0;font-weight:600">${earlierSlots.length}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#666">Checked window:</td>
+            <td style="padding:8px 0;font-weight:600">${today.toLocaleDateString('en-GB')} - ${checkedThrough.toLocaleDateString('en-GB')}</td>
           </tr>
         </table>
         <p style="font-size:12px;color:#999;margin-top:24px">

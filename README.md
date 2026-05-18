@@ -100,7 +100,7 @@ LIFE_SIGNAL_WINDOW_MINUTES=15
 LIFE_SIGNAL_FORCE=false
 ```
 
-The daily life signal is sent during that window even if the same run also finds an earlier slot.
+The daily life signal is sent during that window even if the same run also finds an earlier slot. It reports how many earlier dates were found, not just how many calendar cells were parsed.
 
 To test the life signal manually from GitHub Actions, run the workflow with the `life_signal` input enabled.
 
