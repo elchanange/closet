@@ -40,6 +40,12 @@ const SMTP_PASS    = process.env.SMTP_PASS;
 const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL;
 const PARSING_MODE = (process.env.PARSING_MODE || 'browser').toLowerCase();
 const DRY_RUN      = /^(1|true|yes)$/i.test(process.env.DRY_RUN || '');
+const LIFE_SIGNAL_ENABLED = /^(1|true|yes)$/i.test(process.env.LIFE_SIGNAL_ENABLED || '');
+const LIFE_SIGNAL_FORCE = /^(1|true|yes)$/i.test(process.env.LIFE_SIGNAL_FORCE || '');
+const LIFE_SIGNAL_TZ = process.env.LIFE_SIGNAL_TZ || 'Asia/Jerusalem';
+const LIFE_SIGNAL_HOUR = Number(process.env.LIFE_SIGNAL_HOUR || 10);
+const LIFE_SIGNAL_MINUTE = Number(process.env.LIFE_SIGNAL_MINUTE || 0);
+const LIFE_SIGNAL_WINDOW_MINUTES = Number(process.env.LIFE_SIGNAL_WINDOW_MINUTES || 15);
 
 // Path to a tiny JSON file that persists the "last-known scheduled date"
 // as a fallback when the site doesn't expose the current date directly.
@@ -60,16 +66,28 @@ function parseDate(raw) {
   return new Date(y, m - 1, d);                            // months are 0-indexed
 }
 
+function readState() {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
+    }
+  } catch { /* ignore corrupt file */ }
+  return {};
+}
+
+function writeState(updates) {
+  fs.writeFileSync(STATE_FILE, JSON.stringify({ ...readState(), ...updates }, null, 2));
+}
+
 /**
  * Read the persisted "last-known scheduled date" from disk.
  */
 function readStateDate() {
-  try {
-    if (fs.existsSync(STATE_FILE)) {
-      const { scheduledDate } = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-      return scheduledDate ? new Date(scheduledDate) : null;
-    }
-  } catch { /* ignore corrupt file */ }
+  const { scheduledDate } = readState();
+  if (scheduledDate) {
+    const date = new Date(scheduledDate);
+    if (!isNaN(date)) return date;
+  }
   return null;
 }
 
@@ -78,7 +96,7 @@ function readStateDate() {
  * if the site stops showing the date after a reschedule.
  */
 function writeStateDate(date) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({ scheduledDate: date.toISOString() }));
+  writeState({ scheduledDate: date.toISOString() });
 }
 
 function sleep(ms) {
@@ -156,6 +174,56 @@ function parseCalendarLabel(label) {
   }
 
   return null;
+}
+
+function createEmailTransporter() {
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+function fmtDate(date) {
+  return date.toLocaleDateString('en-GB', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  });
+}
+
+function getLifeSignalTime(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: LIFE_SIGNAL_TZ,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(now).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value;
+    return acc;
+  }, {});
+
+  return {
+    date: `${parts.day}/${parts.month}/${parts.year}`,
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+  };
+}
+
+function isLifeSignalWindow(now = new Date()) {
+  if (LIFE_SIGNAL_FORCE) return true;
+  if (!LIFE_SIGNAL_ENABLED) return false;
+
+  const current = getLifeSignalTime(now);
+  const currentMinuteOfDay = current.hour * 60 + current.minute;
+  const targetMinuteOfDay = LIFE_SIGNAL_HOUR * 60 + LIFE_SIGNAL_MINUTE;
+
+  return (
+    currentMinuteOfDay >= targetMinuteOfDay &&
+    currentMinuteOfDay < targetMinuteOfDay + LIFE_SIGNAL_WINDOW_MINUTES
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -389,16 +457,7 @@ async function sendNotification(scheduledDate, earliestSlot) {
     return;
   }
 
-  const transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_PORT === 465,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-
-  const fmtDate = (d) => d.toLocaleDateString('en-GB', {
-    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
-  });
+  const transporter = createEmailTransporter();
 
   const daysSaved = Math.round(
     (scheduledDate.getTime() - earliestSlot.getTime()) / (1000 * 60 * 60 * 24)
@@ -443,6 +502,57 @@ async function sendNotification(scheduledDate, earliestSlot) {
   console.log(`📧 Email sent to ${NOTIFY_EMAIL}`);
 }
 
+async function sendLifeSignal(scheduledDate, earliestSlot, availableSlots) {
+  if (DRY_RUN) {
+    console.log('DRY_RUN is enabled; skipping life signal email.');
+    return;
+  }
+
+  if (!SMTP_USER || !SMTP_PASS || !NOTIFY_EMAIL) {
+    console.error('❌ Email credentials missing. Set SMTP_USER, SMTP_PASS, NOTIFY_EMAIL.');
+    return;
+  }
+
+  const localTime = getLifeSignalTime();
+  const transporter = createEmailTransporter();
+  const earliestSlotText = earliestSlot ? fmtDate(earliestSlot) : 'No available slots were parsed';
+
+  await transporter.sendMail({
+    from: `"Chili Slot Checker" <${SMTP_USER}>`,
+    to: NOTIFY_EMAIL,
+    subject: `Chili Slot Checker life signal - ${localTime.date} ${String(localTime.hour).padStart(2, '0')}:${String(localTime.minute).padStart(2, '0')}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:540px;margin:0 auto;padding:24px;
+                  border:1px solid #e0e0e0;border-radius:12px">
+        <h2 style="color:#1e4db7;margin-top:0">Chili Slot Checker is running</h2>
+        <table style="border-collapse:collapse;width:100%">
+          <tr>
+            <td style="padding:8px 0;color:#666">Checked at:</td>
+            <td style="padding:8px 0;font-weight:600">${localTime.date} ${String(localTime.hour).padStart(2, '0')}:${String(localTime.minute).padStart(2, '0')} ${LIFE_SIGNAL_TZ}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#666">Current date:</td>
+            <td style="padding:8px 0;font-weight:600">${fmtDate(scheduledDate)}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#666">Earliest open slot:</td>
+            <td style="padding:8px 0;font-weight:600">${earliestSlotText}</td>
+          </tr>
+          <tr>
+            <td style="padding:8px 0;color:#666">Available dates parsed:</td>
+            <td style="padding:8px 0;font-weight:600">${availableSlots.length}</td>
+          </tr>
+        </table>
+        <p style="font-size:12px;color:#999;margin-top:24px">
+          This daily life signal means the scheduled GitHub Actions run completed.
+        </p>
+      </div>
+    `,
+  });
+
+  console.log(`📧 Life signal email sent to ${NOTIFY_EMAIL}`);
+}
+
 // ---------------------------------------------------------------------------
 //  Main execution
 // ---------------------------------------------------------------------------
@@ -456,6 +566,12 @@ async function sendNotification(scheduledDate, earliestSlot) {
   // ── Guard: required env vars ──────────────────────────────────────────
   const missingConfig = [];
   if (!TRACKING_URL || TRACKING_URL.includes('YOUR-TOKEN-HERE')) missingConfig.push('TRACKING_URL');
+  if (LIFE_SIGNAL_ENABLED || LIFE_SIGNAL_FORCE) {
+    if (!LIFE_SIGNAL_TZ) missingConfig.push('LIFE_SIGNAL_TZ');
+    if (!Number.isInteger(LIFE_SIGNAL_HOUR) || LIFE_SIGNAL_HOUR < 0 || LIFE_SIGNAL_HOUR > 23) missingConfig.push('LIFE_SIGNAL_HOUR');
+    if (!Number.isInteger(LIFE_SIGNAL_MINUTE) || LIFE_SIGNAL_MINUTE < 0 || LIFE_SIGNAL_MINUTE > 59) missingConfig.push('LIFE_SIGNAL_MINUTE');
+    if (!Number.isInteger(LIFE_SIGNAL_WINDOW_MINUTES) || LIFE_SIGNAL_WINDOW_MINUTES < 1 || LIFE_SIGNAL_WINDOW_MINUTES > 60) missingConfig.push('LIFE_SIGNAL_WINDOW_MINUTES');
+  }
   if (!DRY_RUN) {
     if (!Number.isFinite(SMTP_PORT)) missingConfig.push('SMTP_PORT');
     if (!SMTP_USER || SMTP_USER.includes('your.email')) missingConfig.push('SMTP_USER');
@@ -479,25 +595,34 @@ async function sendNotification(scheduledDate, earliestSlot) {
     const { scheduledDate, availableSlots } =
       PARSING_MODE === 'api' ? await parseWithApi() : await parseWithBrowser();
 
-    if (!availableSlots.length) {
+    const earliestSlot = availableSlots.length
+      ? availableSlots.reduce((min, d) => (d < min ? d : min), availableSlots[0])
+      : null;
+
+    if (earliestSlot) {
+      console.log(`🏷️  Earliest available slot: ${earliestSlot.toLocaleDateString('en-GB')}`);
+    } else {
       console.log('ℹ️  No available slots found. Nothing to compare.');
-      process.exit(0);
     }
 
-    // ── 2. Find the earliest available slot ────────────────────────────
-    const earliestSlot = availableSlots.reduce(
-      (min, d) => (d < min ? d : min),
-      availableSlots[0],
-    );
-
-    console.log(`🏷️  Earliest available slot: ${earliestSlot.toLocaleDateString('en-GB')}`);
-
     // ── 3. Compare: alert only if strictly earlier ─────────────────────
-    if (earliestSlot < scheduledDate) {
+    if (earliestSlot && earliestSlot < scheduledDate) {
       console.log('🎉 Earlier slot detected! Sending notification …');
       await sendNotification(scheduledDate, earliestSlot);
+    } else if (!earliestSlot) {
+      console.log('No earlier slot can be evaluated because no slots were parsed.');
     } else {
       console.log('😐 No earlier slot available. Current date is still the best.');
+    }
+
+    if (isLifeSignalWindow()) {
+      console.log('Daily life signal window matched. Sending status email …');
+      await sendLifeSignal(scheduledDate, earliestSlot, availableSlots);
+    } else if (LIFE_SIGNAL_ENABLED) {
+      const localTime = getLifeSignalTime();
+      console.log(
+        `Life signal is enabled for ${String(LIFE_SIGNAL_HOUR).padStart(2, '0')}:${String(LIFE_SIGNAL_MINUTE).padStart(2, '0')} ${LIFE_SIGNAL_TZ}; current local time is ${String(localTime.hour).padStart(2, '0')}:${String(localTime.minute).padStart(2, '0')}.`
+      );
     }
   } catch (err) {
     console.error('❌ Error during execution:', err.message || err);

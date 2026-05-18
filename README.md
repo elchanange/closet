@@ -87,6 +87,23 @@ DRY_RUN=true
 
 Set it to `false` after `npm run test-email` succeeds.
 
+## Daily Life Signal
+
+The checker can send one daily status email from the run that lands in the `10:00` to `10:14` Israel-time window. Keep these values:
+
+```env
+LIFE_SIGNAL_ENABLED=true
+LIFE_SIGNAL_TZ=Asia/Jerusalem
+LIFE_SIGNAL_HOUR=10
+LIFE_SIGNAL_MINUTE=0
+LIFE_SIGNAL_WINDOW_MINUTES=15
+LIFE_SIGNAL_FORCE=false
+```
+
+The daily life signal is sent during that window even if the same run also finds an earlier slot.
+
+To test the life signal manually from GitHub Actions, run the workflow with the `life_signal` input enabled.
+
 ## GitHub Actions Setup
 
 The workflow in `.github/workflows/check-slots.yml` runs every 15 minutes and can also be started manually.

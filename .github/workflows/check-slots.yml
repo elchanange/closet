@@ -19,6 +19,12 @@ on:
     # Every 15 minutes
     - cron: '*/15 * * * *'
   workflow_dispatch:          # Allow manual runs from the Actions tab
+    inputs:
+      life_signal:
+        description: 'Send a life signal email on this manual run'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   check-slot:
@@ -46,7 +52,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .last-known-date.json
-          key: slot-checker-state-${{ github.sha }}
+          key: slot-checker-state-${{ github.run_id }}
           restore-keys: slot-checker-state-
 
       # ── 5. Run the slot checker ───────────────────────────────────────
@@ -59,4 +65,10 @@ jobs:
           SMTP_PASS:    ${{ secrets.SMTP_PASS }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
           PARSING_MODE: browser
+          LIFE_SIGNAL_ENABLED: true
+          LIFE_SIGNAL_TZ: Asia/Jerusalem
+          LIFE_SIGNAL_HOUR: 10
+          LIFE_SIGNAL_MINUTE: 0
+          LIFE_SIGNAL_WINDOW_MINUTES: 15
+          LIFE_SIGNAL_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.life_signal }}
         run: node check-slots.js
