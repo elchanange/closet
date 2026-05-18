@@ -99,6 +99,51 @@ function writeStateDate(date) {
   writeState({ scheduledDate: date.toISOString() });
 }
 
+function startOfDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function startOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function dateKey(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+function monthKey(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+  ].join('-');
+}
+
+function compareMonths(a, b) {
+  return (a.getFullYear() - b.getFullYear()) || (a.getMonth() - b.getMonth());
+}
+
+function getTodayInTimeZone(timeZone = LIFE_SIGNAL_TZ, now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value;
+    return acc;
+  }, {});
+
+  return new Date(Number(parts.year), Number(parts.month) - 1, Number(parts.day));
+}
+
+function uniqueDates(dates) {
+  return [...new Map(dates.map(date => [dateKey(date), date])).values()];
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -226,6 +271,103 @@ function isLifeSignalWindow(now = new Date()) {
   );
 }
 
+async function readVisibleCalendar(page) {
+  const raw = await page.evaluate(() => {
+    const readCells = (selector) => Array.from(document.querySelectorAll(selector)).map(cell => ({
+      label: cell.getAttribute('aria-label') || '',
+      day: cell.querySelector('.mat-calendar-body-cell-content')?.textContent?.trim() || '',
+    }));
+
+    return {
+      visible: readCells('.mat-calendar-body-cell'),
+      available: readCells('.highlighted-available-date, .mat-calendar-body-cell:not(.mat-calendar-body-disabled)'),
+    };
+  });
+
+  return {
+    visibleDates: uniqueDates(raw.visible.map(({ label }) => parseCalendarLabel(label)).filter(Boolean)),
+    availableDates: uniqueDates(raw.available.map(({ label }) => parseCalendarLabel(label)).filter(Boolean)),
+  };
+}
+
+function getVisibleMonthStart(calendar) {
+  if (!calendar.visibleDates.length) return null;
+  return startOfMonth(calendar.visibleDates[0]);
+}
+
+async function clickCalendarNav(page, direction) {
+  const selector = direction === 'previous'
+    ? '.mat-calendar-previous-button'
+    : '.mat-calendar-next-button';
+  const button = await page.$(selector);
+  if (!button) return false;
+
+  const disabled = await button.evaluate(el =>
+    el.disabled || el.getAttribute('aria-disabled') === 'true'
+  );
+  if (disabled) return false;
+
+  await button.click();
+  await sleep(700);
+  return true;
+}
+
+async function moveCalendarToMonth(page, targetMonthStart) {
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const calendar = await readVisibleCalendar(page);
+    const visibleMonthStart = getVisibleMonthStart(calendar);
+    if (!visibleMonthStart) return calendar;
+
+    const comparison = compareMonths(visibleMonthStart, targetMonthStart);
+    if (comparison === 0) return calendar;
+
+    const moved = await clickCalendarNav(page, comparison > 0 ? 'previous' : 'next');
+    if (!moved) return calendar;
+  }
+
+  throw new Error('Could not move calendar to the requested scan month.');
+}
+
+async function scanAvailableSlots(page, scanStart, scanEnd) {
+  const scanStartDay = startOfDay(scanStart);
+  const scanEndDay = startOfDay(scanEnd);
+  const scanStartMonth = startOfMonth(scanStartDay);
+  const scanEndMonth = startOfMonth(scanEndDay);
+  const slots = [];
+  const visitedMonths = new Set();
+
+  console.log(
+    `🔎 Scanning calendar from ${scanStartDay.toLocaleDateString('en-GB')} through ${scanEndDay.toLocaleDateString('en-GB')}.`
+  );
+
+  let calendar = await moveCalendarToMonth(page, scanStartMonth);
+
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    const visibleMonthStart = getVisibleMonthStart(calendar);
+    if (!visibleMonthStart) break;
+    if (compareMonths(visibleMonthStart, scanEndMonth) > 0) break;
+
+    const key = monthKey(visibleMonthStart);
+    if (!visitedMonths.has(key)) {
+      visitedMonths.add(key);
+      const monthSlots = calendar.availableDates.filter(date => {
+        const day = startOfDay(date);
+        return day >= scanStartDay && day <= scanEndDay;
+      });
+      slots.push(...monthSlots);
+      console.log(`🔍 ${key}: parsed ${monthSlots.length} candidate slot date(s).`);
+    }
+
+    if (compareMonths(visibleMonthStart, scanEndMonth) === 0) break;
+
+    const moved = await clickCalendarNav(page, 'next');
+    if (!moved) break;
+    calendar = await readVisibleCalendar(page);
+  }
+
+  return uniqueDates(slots);
+}
+
 // ---------------------------------------------------------------------------
 //  Option A — Browser-based parsing (Puppeteer)
 // ---------------------------------------------------------------------------
@@ -347,44 +489,11 @@ async function parseWithBrowser() {
       console.log('ℹ️  Datepicker toggle not found — calendar may be inline.');
     }
 
-    // ── Step 6: Scrape available (highlighted) dates from the calendar ──
-    // ┌──────────────────────────────────────────────────────────────────┐
-    // │ SELECTORS TO UPDATE:                                            │
-    // │ Available dates in Angular Material datepicker have the class   │
-    // │ "highlighted-available-date" and an aria-label like "14 June…". │
-    // │ We also inspect the fallback: standard mat-calendar cells that  │
-    // │ are not disabled.                                               │
-    // └──────────────────────────────────────────────────────────────────┘
-    const availableDates = await page.evaluate(() => {
-      const dates = [];
+    const today = getTodayInTimeZone();
+    const scanEnd = scheduledDate > today ? scheduledDate : today;
+    const parsedSlots = await scanAvailableSlots(page, today, scanEnd);
 
-      // Primary: custom-highlighted cells
-      document.querySelectorAll(
-        '.highlighted-available-date, .mat-calendar-body-cell:not(.mat-calendar-body-disabled)'
-      ).forEach(cell => {
-        // aria-label is usually "June 10, 2026" or "10 ביוני 2026" etc.
-        const label = cell.getAttribute('aria-label') || '';
-        // The cell also embeds a data attribute or inner text with the day number.
-        const dayText = cell.querySelector('.mat-calendar-body-cell-content')?.textContent?.trim();
-        dates.push({ label, day: dayText });
-      });
-
-      // Also look for the input field itself which shows "D.M.YYYY"
-      const dateInput = document.querySelector('input[matDatepicker], input[matInput]');
-      const inputValue = dateInput?.value || '';
-
-      return { dates, inputValue };
-    });
-
-    console.log(`🔍 Found ${availableDates.dates.length} calendar cells.`);
-
-    // Parse each available date. The aria-label may follow several formats:
-    //   "June 10, 2026" | "10 June 2026" | "10 ביוני 2026" | "10.6.2026"
-    const parsedSlots = availableDates.dates
-      .map(({ label }) => parseCalendarLabel(label))
-      .filter(Boolean);
-
-    console.log(`📋 Parsed ${parsedSlots.length} available slot date(s).`);
+    console.log(`📋 Parsed ${parsedSlots.length} available slot date(s) from today's scan window.`);
 
     return { scheduledDate, availableSlots: parsedSlots };
   } finally {

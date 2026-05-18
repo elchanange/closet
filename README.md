@@ -104,6 +104,10 @@ The daily life signal is sent during that window even if the same run also finds
 
 To test the life signal manually from GitHub Actions, run the workflow with the `life_signal` input enabled.
 
+## Scan Window
+
+Each browser run scans available calendar dates from the run's current Israel-time date through the current scheduled delivery date. It does not scan dates after the scheduled delivery date, because those are not sooner.
+
 ## GitHub Actions Setup
 
 The workflow in `.github/workflows/check-slots.yml` runs every 15 minutes and can also be started manually.
