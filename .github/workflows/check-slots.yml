@@ -1,0 +1,62 @@
+# ============================================================================
+#  Chili Delivery Slot Checker — GitHub Actions Workflow
+# ============================================================================
+#  Runs every 15 minutes via cron.  Also allows manual dispatch.
+#
+#  Required Repository Secrets:
+#    TRACKING_URL   – full Chili tracking URL
+#    SMTP_HOST      – SMTP server  (default: smtp.gmail.com)
+#    SMTP_PORT      – SMTP port    (default: 465)
+#    SMTP_USER      – sender email
+#    SMTP_PASS      – app password
+#    NOTIFY_EMAIL   – recipient email
+# ============================================================================
+
+name: Check Delivery Slots
+
+on:
+  schedule:
+    # Every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:          # Allow manual runs from the Actions tab
+
+jobs:
+  check-slot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5        # Hard cap to prevent runaway billing
+
+    steps:
+      # ── 1. Checkout the repo ───────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Node.js ─────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ── 3. Install dependencies ───────────────────────────────────────
+      - name: Install dependencies
+        run: npm ci
+
+      # ── 4. Restore persisted state (last-known date) ──────────────────
+      #    We use the Actions cache so the baseline date survives across runs.
+      - name: Restore last-known date
+        uses: actions/cache@v4
+        with:
+          path: .last-known-date.json
+          key: slot-checker-state-${{ github.sha }}
+          restore-keys: slot-checker-state-
+
+      # ── 5. Run the slot checker ───────────────────────────────────────
+      - name: Run slot checker
+        env:
+          TRACKING_URL: ${{ secrets.TRACKING_URL }}
+          SMTP_HOST:    ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:    ${{ secrets.SMTP_PORT }}
+          SMTP_USER:    ${{ secrets.SMTP_USER }}
+          SMTP_PASS:    ${{ secrets.SMTP_PASS }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          PARSING_MODE: browser
+        run: node check-slots.js

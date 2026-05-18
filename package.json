@@ -1,0 +1,13 @@
+{
+  "name": "chili-slot-checker",
+  "version": "1.0.0",
+  "description": "Automated delivery slot checker for Chili — alerts via email when an earlier slot opens up.",
+  "main": "check-slots.js",
+  "scripts": {
+    "check": "node check-slots.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.16",
+    "puppeteer": "^24.9.0"
+  }
+}
