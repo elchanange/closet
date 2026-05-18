@@ -22,10 +22,12 @@
 //                         (use this if you later discover a direct API).
 // ============================================================================
 
-const puppeteer   = require('puppeteer');
-const nodemailer  = require('nodemailer');
 const fs          = require('fs');
 const path        = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env'), quiet: true });
+
+const puppeteer   = require('puppeteer');
+const nodemailer  = require('nodemailer');
 
 // ---------------------------------------------------------------------------
 //  Configuration
@@ -37,6 +39,7 @@ const SMTP_USER    = process.env.SMTP_USER;
 const SMTP_PASS    = process.env.SMTP_PASS;
 const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL;
 const PARSING_MODE = (process.env.PARSING_MODE || 'browser').toLowerCase();
+const DRY_RUN      = /^(1|true|yes)$/i.test(process.env.DRY_RUN || '');
 
 // Path to a tiny JSON file that persists the "last-known scheduled date"
 // as a fallback when the site doesn't expose the current date directly.
@@ -76,6 +79,83 @@ function readStateDate() {
  */
 function writeStateDate(date) {
   fs.writeFileSync(STATE_FILE, JSON.stringify({ scheduledDate: date.toISOString() }));
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+const UPDATE_BUTTON_TEXT = '\u05e2\u05d3\u05db\u05d5\u05df';
+const CONTINUE_BUTTON_TEXT = '\u05d4\u05de\u05e9\u05da';
+
+async function findButtonByText(page, expectedText) {
+  const buttons = await page.$$('button');
+  for (const button of buttons) {
+    const text = await button.evaluate(el => el.textContent?.trim() || '');
+    if (text.includes(expectedText)) return button;
+    await button.dispose();
+  }
+  return null;
+}
+
+function extractScheduledDate(bodyText) {
+  const patterns = [
+    /\u05ea\u05d5\u05d0\u05de\u05d4\s+\u05dc\u05d9\u05d5\u05dd\s+\S+\s+(\d{1,2}[./]\d{1,2}[./]\d{4})/,
+    /\u05ea\u05d0\u05e8\u05d9\u05da[^\d]*(\d{1,2}[./]\d{1,2}[./]\d{4})/,
+    /(\d{1,2}[./]\d{1,2}[./]\d{4})/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = bodyText.match(pattern);
+    const date = match ? parseDate(match[1]) : null;
+    if (date) return date;
+  }
+
+  return null;
+}
+
+const HEBREW_MONTHS = new Map([
+  ['\u05d9\u05e0\u05d5\u05d0\u05e8', 0],
+  ['\u05e4\u05d1\u05e8\u05d5\u05d0\u05e8', 1],
+  ['\u05de\u05e8\u05e5', 2],
+  ['\u05d0\u05e4\u05e8\u05d9\u05dc', 3],
+  ['\u05de\u05d0\u05d9', 4],
+  ['\u05d9\u05d5\u05e0\u05d9', 5],
+  ['\u05d9\u05d5\u05dc\u05d9', 6],
+  ['\u05d0\u05d5\u05d2\u05d5\u05e1\u05d8', 7],
+  ['\u05e1\u05e4\u05d8\u05de\u05d1\u05e8', 8],
+  ['\u05d0\u05d5\u05e7\u05d8\u05d5\u05d1\u05e8', 9],
+  ['\u05e0\u05d5\u05d1\u05de\u05d1\u05e8', 10],
+  ['\u05d3\u05e6\u05de\u05d1\u05e8', 11],
+]);
+
+function parseCalendarLabel(label) {
+  if (!label) return null;
+
+  const numericMatch = label.match(/(\d{1,2})[./](\d{1,2})[./](\d{4})/);
+  if (numericMatch) {
+    return new Date(+numericMatch[3], +numericMatch[2] - 1, +numericMatch[1]);
+  }
+
+  const enMonthFirst = label.match(/([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+  if (enMonthFirst) {
+    const date = new Date(`${enMonthFirst[1]} ${enMonthFirst[2]}, ${enMonthFirst[3]}`);
+    return isNaN(date) ? null : date;
+  }
+
+  const enDayFirst = label.match(/(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/);
+  if (enDayFirst) {
+    const date = new Date(`${enDayFirst[2]} ${enDayFirst[1]}, ${enDayFirst[3]}`);
+    return isNaN(date) ? null : date;
+  }
+
+  const heDayFirst = label.match(/(\d{1,2})\s+([\u0590-\u05ff]+)\s+(\d{4})/);
+  if (heDayFirst) {
+    const month = HEBREW_MONTHS.get(heDayFirst[2]);
+    if (month !== undefined) return new Date(+heDayFirst[3], month, +heDayFirst[1]);
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +206,7 @@ async function parseWithBrowser() {
     const bodyText = await page.evaluate(() => document.body.innerText);
     const scheduledMatch = bodyText.match(/תואמה\s+ליום\s+\S+\s+(\d{1,2}\/\d{1,2}\/\d{4})/);
     let scheduledDate = scheduledMatch ? parseDate(scheduledMatch[1]) : null;
+    if (!scheduledDate) scheduledDate = extractScheduledDate(bodyText);
 
     if (!scheduledDate) {
       console.warn('⚠️  Could not extract scheduled date from page text. Trying state file …');
@@ -145,17 +226,13 @@ async function parseWithBrowser() {
 
     // ── Step 3: Navigate to the reschedule calendar ────────────────────
     // Click the "עדכון" (Update) button.
-    const updateBtn = await page.$('button.update-btn, button[color="primary"]');
-    if (!updateBtn) {
-      // Maybe the page already moved on or layout changed — try text match.
-      const [btn] = await page.$x("//button[contains(., 'עדכון')]");
-      if (btn) await btn.click();
-      else throw new Error('Could not find the "עדכון" (Update) button.');
-    } else {
-      await updateBtn.click();
-    }
+    let updateBtn = await page.$('button.update-btn');
+    if (!updateBtn) updateBtn = await findButtonByText(page, UPDATE_BUTTON_TEXT);
+    if (!updateBtn) updateBtn = await page.$('button[color="primary"]');
+    if (!updateBtn) throw new Error('Could not find the Update button.');
+    await updateBtn.click();
     console.log('🖱️  Clicked "Update" button.');
-    await page.waitForTimeout(1500);
+    await sleep(1500);
 
     // ── Step 4: Accept the T&C checkbox and click "המשך" (Continue) ───
     // The T&C checkbox may be a mat-checkbox; click its inner input or the label.
@@ -170,12 +247,12 @@ async function parseWithBrowser() {
       console.log('ℹ️  No T&C checkbox found — skipping.');
     }
 
-    await page.waitForTimeout(500);
+    await sleep(500);
 
     // Click "המשך" (Continue)
     try {
       const continueBtn =
-        (await page.$x("//button[contains(., 'המשך')]"))[0] ||
+        (await findButtonByText(page, CONTINUE_BUTTON_TEXT)) ||
         (await page.$('button.continue-btn'));
       if (continueBtn) {
         await continueBtn.click();
@@ -185,7 +262,7 @@ async function parseWithBrowser() {
       console.log('ℹ️  No "Continue" button found — the calendar may already be visible.');
     }
 
-    await page.waitForTimeout(2000);
+    await sleep(2000);
 
     // ── Step 5: Open the datepicker / navigate months to find slots ────
     // Click the calendar icon to open the Material datepicker popup.
@@ -196,7 +273,7 @@ async function parseWithBrowser() {
       if (calendarToggle) {
         await calendarToggle.click();
         console.log('📆 Opened datepicker.');
-        await page.waitForTimeout(1000);
+        await sleep(1000);
       }
     } catch {
       console.log('ℹ️  Datepicker toggle not found — calendar may be inline.');
@@ -235,27 +312,9 @@ async function parseWithBrowser() {
 
     // Parse each available date. The aria-label may follow several formats:
     //   "June 10, 2026" | "10 June 2026" | "10 ביוני 2026" | "10.6.2026"
-    const parsedSlots = [];
-    for (const { label, day } of availableDates.dates) {
-      // Try the simple D.M.YYYY inside the label
-      const dmyMatch = label.match(/(\d{1,2})[./](\d{1,2})[./](\d{4})/);
-      if (dmyMatch) {
-        parsedSlots.push(new Date(+dmyMatch[3], +dmyMatch[2] - 1, +dmyMatch[1]));
-        continue;
-      }
-      // Try English "Month DD, YYYY"
-      const enMatch = label.match(/(\w+)\s+(\d{1,2}),?\s+(\d{4})/);
-      if (enMatch) {
-        const d = new Date(`${enMatch[1]} ${enMatch[2]}, ${enMatch[3]}`);
-        if (!isNaN(d)) { parsedSlots.push(d); continue; }
-      }
-      // Try "DD Month YYYY" (English)
-      const enMatch2 = label.match(/(\d{1,2})\s+(\w+)\s+(\d{4})/);
-      if (enMatch2) {
-        const d = new Date(`${enMatch2[2]} ${enMatch2[1]}, ${enMatch2[3]}`);
-        if (!isNaN(d)) { parsedSlots.push(d); continue; }
-      }
-    }
+    const parsedSlots = availableDates.dates
+      .map(({ label }) => parseCalendarLabel(label))
+      .filter(Boolean);
 
     console.log(`📋 Parsed ${parsedSlots.length} available slot date(s).`);
 
@@ -320,6 +379,11 @@ async function parseWithApi() {
 // ---------------------------------------------------------------------------
 
 async function sendNotification(scheduledDate, earliestSlot) {
+  if (DRY_RUN) {
+    console.log('DRY_RUN is enabled; skipping email notification.');
+    return;
+  }
+
   if (!SMTP_USER || !SMTP_PASS || !NOTIFY_EMAIL) {
     console.error('❌ Email credentials missing. Set SMTP_USER, SMTP_PASS, NOTIFY_EMAIL.');
     return;
@@ -390,9 +454,24 @@ async function sendNotification(scheduledDate, earliestSlot) {
   console.log('═══════════════════════════════════════════════════');
 
   // ── Guard: required env vars ──────────────────────────────────────────
-  if (!TRACKING_URL) {
-    console.error('❌ TRACKING_URL environment variable is not set. Exiting.');
+  const missingConfig = [];
+  if (!TRACKING_URL || TRACKING_URL.includes('YOUR-TOKEN-HERE')) missingConfig.push('TRACKING_URL');
+  if (!DRY_RUN) {
+    if (!Number.isFinite(SMTP_PORT)) missingConfig.push('SMTP_PORT');
+    if (!SMTP_USER || SMTP_USER.includes('your.email')) missingConfig.push('SMTP_USER');
+    if (!SMTP_PASS || SMTP_PASS.includes('your-16-char')) missingConfig.push('SMTP_PASS');
+    if (!NOTIFY_EMAIL || NOTIFY_EMAIL.includes('recipient@example.com')) missingConfig.push('NOTIFY_EMAIL');
+  }
+
+  if (missingConfig.length) {
+    console.error(`❌ Missing required configuration: ${missingConfig.join(', ')}`);
+    console.error(`   Locally, fill ${path.join(__dirname, '.env')}.`);
+    console.error('   In GitHub, add the same values as repository Actions secrets.');
     process.exit(1);
+  }
+
+  if (DRY_RUN) {
+    console.log('DRY_RUN is enabled; email settings are optional for this run.');
   }
 
   try {
