@@ -1,7 +1,7 @@
 # ============================================================================
 #  Chili Delivery Slot Checker — GitHub Actions Workflow
 # ============================================================================
-#  Runs every 15 minutes via cron.  Also allows manual dispatch.
+#  Runs every 30 minutes via cron, offset from :00 and :30. Also allows manual dispatch.
 #
 #  Required Repository Secrets:
 #    TRACKING_URL   – full Chili tracking URL
@@ -16,8 +16,8 @@ name: Check Delivery Slots
 
 on:
   schedule:
-    # Every 15 minutes
-    - cron: '*/15 * * * *'
+    # Every 30 minutes, offset from the busiest boundaries
+    - cron: '7,37 * * * *'
   workflow_dispatch:          # Allow manual runs from the Actions tab
     inputs:
       life_signal:

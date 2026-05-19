@@ -110,7 +110,7 @@ Each browser run scans available calendar dates from the run's current Israel-ti
 
 ## GitHub Actions Setup
 
-The workflow in `.github/workflows/check-slots.yml` runs every 15 minutes and can also be started manually.
+The workflow in `.github/workflows/check-slots.yml` runs every 30 minutes at `:07` and `:37`, and can also be started manually.
 
 In the GitHub repository, add these repository secrets:
 
