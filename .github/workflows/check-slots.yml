@@ -16,8 +16,8 @@ name: Check Delivery Slots
 
 on:
   schedule:
-    # Every 30 minutes, offset from the busiest boundaries
-    - cron: '7,37 * * * *'
+    # Every 15 minutes, offset from the busiest boundaries
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:          # Allow manual runs from the Actions tab
     inputs:
       life_signal:
