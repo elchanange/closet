@@ -24,6 +24,8 @@ const SMTP_PASS = process.env.SMTP_PASS;
 const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL;
 const DRY_RUN = /^(1|true|yes)$/i.test(process.env.DRY_RUN || '');
 const ALERT_ON_FIRST_RUN = /^(1|true|yes)$/i.test(process.env.NEVE_ALERT_ON_FIRST_RUN || '');
+const LIFE_SIGNAL_ENABLED = /^(1|true|yes)$/i.test(process.env.NEVE_LIFE_SIGNAL_ENABLED || '');
+const LIFE_SIGNAL_INTERVAL_HOURS = Number(process.env.NEVE_LIFE_SIGNAL_INTERVAL_HOURS || 3);
 
 const EXPECTED = {
   title: '\u05de\u05d5\u05e2\u05d3\u05d5\u05df \u05db\u05ea\u05d1 64',
@@ -316,6 +318,58 @@ async function sendAlert(snapshot, reasons) {
   console.log(`Email sent to ${NOTIFY_EMAIL}`);
 }
 
+function shouldSendLifeSignal(state, now = new Date()) {
+  if (!LIFE_SIGNAL_ENABLED) return false;
+
+  const lastSentAt = state.lastLifeSignalAt ? Date.parse(state.lastLifeSignalAt) : NaN;
+  if (!Number.isFinite(lastSentAt)) return true;
+
+  const intervalMs = LIFE_SIGNAL_INTERVAL_HOURS * 60 * 60 * 1000;
+  return now.getTime() - lastSentAt >= intervalMs;
+}
+
+async function sendLifeSignal(snapshot) {
+  if (DRY_RUN) {
+    console.log('DRY_RUN is enabled; skipping life signal email.');
+    return;
+  }
+
+  if (!SMTP_USER || !SMTP_PASS || !NOTIFY_EMAIL) {
+    throw new Error('Email credentials missing. Set SMTP_USER, SMTP_PASS, and NOTIFY_EMAIL.');
+  }
+
+  const transporter = createEmailTransporter();
+  const linkItems = snapshot.purchaseLinks.length
+    ? snapshot.purchaseLinks.map(link => `<li>${escapeHtml(link)}</li>`).join('')
+    : '<li>No explicit external ticket link found yet.</li>';
+  const statusText = snapshot.likelyAvailable
+    ? 'Tickets may be available'
+    : 'Still checking; tickets still look unavailable';
+
+  await transporter.sendMail({
+    from: `"Neve Ticket Checker" <${SMTP_USER}>`,
+    to: NOTIFY_EMAIL,
+    subject: `Neve ticket checker alive - ${statusText}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;padding:24px;border:1px solid #e0e0e0;border-radius:12px">
+        <h2 style="margin-top:0;color:#1e4db7">Neve Schechter ticket monitor is running</h2>
+        <p><a href="${escapeHtml(snapshot.finalUrl)}">Open ticket page</a></p>
+        <table style="border-collapse:collapse;width:100%">
+          <tr><td style="padding:6px 0;color:#666">Checked at</td><td style="padding:6px 0;font-weight:600">${escapeHtml(snapshot.checkedAt)}</td></tr>
+          <tr><td style="padding:6px 0;color:#666">Title</td><td style="padding:6px 0;font-weight:600">${escapeHtml(snapshot.title)}</td></tr>
+          <tr><td style="padding:6px 0;color:#666">Out of stock</td><td style="padding:6px 0;font-weight:600">${snapshot.outOfStock}</td></tr>
+          <tr><td style="padding:6px 0;color:#666">Likely available</td><td style="padding:6px 0;font-weight:600">${snapshot.likelyAvailable}</td></tr>
+          <tr><td style="padding:6px 0;color:#666">Final URL</td><td style="padding:6px 0;font-weight:600">${escapeHtml(snapshot.finalUrl)}</td></tr>
+        </table>
+        <h3>Purchase links seen</h3>
+        <ul>${linkItems}</ul>
+      </div>
+    `,
+  });
+
+  console.log(`Life signal email sent to ${NOTIFY_EMAIL}`);
+}
+
 async function fetchSnapshot() {
   const res = await fetch(TICKET_URL, {
     redirect: 'follow',
@@ -338,6 +392,9 @@ async function fetchSnapshot() {
 
   const missingConfig = [];
   if (!Number.isFinite(SMTP_PORT)) missingConfig.push('SMTP_PORT');
+  if (!Number.isFinite(LIFE_SIGNAL_INTERVAL_HOURS) || LIFE_SIGNAL_INTERVAL_HOURS <= 0) {
+    missingConfig.push('NEVE_LIFE_SIGNAL_INTERVAL_HOURS');
+  }
   if (!DRY_RUN) {
     if (!SMTP_USER || SMTP_USER.includes('your.email')) missingConfig.push('SMTP_USER');
     if (!SMTP_PASS || SMTP_PASS.includes('your-16-char')) missingConfig.push('SMTP_PASS');
@@ -348,6 +405,7 @@ async function fetchSnapshot() {
   }
 
   const state = readState();
+  const now = new Date();
   const previous = state.lastSignature || null;
   const snapshot = await fetchSnapshot();
   const currentSignature = signature(snapshot);
@@ -371,24 +429,33 @@ async function fetchSnapshot() {
 
   console.log(JSON.stringify(snapshot, null, 2));
 
+  const stateUpdates = {
+    lastSignature: currentSignature,
+    lastCheckedAt: snapshot.checkedAt,
+  };
+
   if (shouldAlert && state.lastAlertKey !== alertKey) {
     console.log(`Alert condition matched: ${reasons.join('; ') || 'first run requested'}`);
     await sendAlert(snapshot, reasons.length ? reasons : ['First run alert requested']);
-    writeState({
-      lastSignature: currentSignature,
-      lastCheckedAt: snapshot.checkedAt,
+    Object.assign(stateUpdates, {
       lastAlertKey: alertKey,
-      lastAlertedAt: new Date().toISOString(),
+      lastAlertedAt: now.toISOString(),
+      lastLifeSignalAt: now.toISOString(),
     });
   } else {
     console.log(firstRun
       ? 'Baseline saved; no alert because tickets still look unavailable.'
       : 'No material ticket-page change detected.');
-    writeState({
-      lastSignature: currentSignature,
-      lastCheckedAt: snapshot.checkedAt,
-    });
+
+    if (shouldSendLifeSignal(state, now)) {
+      await sendLifeSignal(snapshot);
+      stateUpdates.lastLifeSignalAt = now.toISOString();
+    } else if (LIFE_SIGNAL_ENABLED) {
+      console.log(`Life signal is enabled every ${LIFE_SIGNAL_INTERVAL_HOURS} hour(s); not due yet.`);
+    }
   }
+
+  writeState(stateUpdates);
 })().catch(err => {
   console.error('Error during execution:', err.message || err);
   process.exit(1);

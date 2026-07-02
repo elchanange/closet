@@ -58,6 +58,13 @@ NEVE_TICKET_URL=https://neve-schechter.org.il/product/moadon-64/
 
 The checker alerts if the out-of-stock marker disappears, the final/canonical URL changes, event details change, or purchase/ticket links change.
 
+The Neve checker can also send a life signal email even when nothing changes:
+
+```env
+NEVE_LIFE_SIGNAL_ENABLED=true
+NEVE_LIFE_SIGNAL_INTERVAL_HOURS=3
+```
+
 `SMTP_USER`
 
 The email address that will send alerts. For Gmail, this is your Gmail address.
@@ -130,7 +137,7 @@ Each browser run scans available calendar dates from the run's current Israel-ti
 
 The workflow in `.github/workflows/check-slots.yml` runs every 15 minutes at `:07`, `:22`, `:37`, and `:52`, and can also be started manually.
 
-The workflow in `.github/workflows/check-neve-tickets.yml` runs every 5 minutes and can also be started manually. It restores `.neve-ticket-state.json` from the Actions cache so it can compare the current page against the previous run.
+The workflow in `.github/workflows/check-neve-tickets.yml` runs every 5 minutes and can also be started manually. It restores `.neve-ticket-state.json` from the Actions cache so it can compare the current page against the previous run and send one life signal email every 3 hours.
 
 In the GitHub repository, add these repository secrets:
 
