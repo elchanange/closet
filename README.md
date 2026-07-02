@@ -2,6 +2,8 @@
 
 Checks the Chili delivery coordination page and sends an email when an earlier delivery slot appears.
 
+It also includes a Neve Schechter ticket monitor for `moadon-64`, using the same email settings and GitHub Actions cron pattern.
+
 ## Local Setup
 
 1. Install dependencies:
@@ -22,6 +24,12 @@ Checks the Chili delivery coordination page and sends an email when an earlier d
    npm run check
    ```
 
+   Run one Neve Schechter ticket check:
+
+   ```powershell
+   npm run check:neve
+   ```
+
 4. Test only the email settings:
 
    ```powershell
@@ -39,6 +47,16 @@ TRACKING_URL=https://web.chili.co.il/deliveryzCoordinateApp/app/...
 ```
 
 Do not trim the token at the end of the URL.
+
+`NEVE_TICKET_URL`
+
+The Neve Schechter product/event page to monitor:
+
+```env
+NEVE_TICKET_URL=https://neve-schechter.org.il/product/moadon-64/
+```
+
+The checker alerts if the out-of-stock marker disappears, the final/canonical URL changes, event details change, or purchase/ticket links change.
 
 `SMTP_USER`
 
@@ -110,7 +128,9 @@ Each browser run scans available calendar dates from the run's current Israel-ti
 
 ## GitHub Actions Setup
 
-The workflow in `.github/workflows/check-slots.yml` runs every 30 minutes at `:07` and `:37`, and can also be started manually.
+The workflow in `.github/workflows/check-slots.yml` runs every 15 minutes at `:07`, `:22`, `:37`, and `:52`, and can also be started manually.
+
+The workflow in `.github/workflows/check-neve-tickets.yml` runs every 5 minutes and can also be started manually. It restores `.neve-ticket-state.json` from the Actions cache so it can compare the current page against the previous run.
 
 In the GitHub repository, add these repository secrets:
 

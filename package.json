@@ -5,6 +5,7 @@
   "main": "check-slots.js",
   "scripts": {
     "check": "node check-slots.js",
+    "check:neve": "node check-neve-tickets.js",
     "test-email": "node test-email.js"
   },
   "dependencies": {

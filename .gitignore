@@ -1,3 +1,4 @@
 node_modules/
 .env
 .last-known-date.json
+.neve-ticket-state.json

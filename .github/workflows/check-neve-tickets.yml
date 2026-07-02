@@ -1,0 +1,61 @@
+# ============================================================================
+#  Neve Schechter Ticket Checker - GitHub Actions Workflow
+# ============================================================================
+#  Runs every 5 minutes via cron and can also be started manually.
+#
+#  Required Repository Secrets:
+#    SMTP_HOST      - SMTP server  (default: smtp.gmail.com)
+#    SMTP_PORT      - SMTP port    (default: 465)
+#    SMTP_USER      - sender email
+#    SMTP_PASS      - app password
+#    NOTIFY_EMAIL   - recipient email
+# ============================================================================
+
+name: Check Neve Tickets
+
+on:
+  schedule:
+    # GitHub Actions' practical minimum cadence is every 5 minutes.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      alert_on_first_run:
+        description: 'Send an email even if this is only establishing the first baseline'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  check-neve-ticket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore Neve ticket state
+        uses: actions/cache@v4
+        with:
+          path: .neve-ticket-state.json
+          key: neve-ticket-state-${{ github.run_id }}
+          restore-keys: neve-ticket-state-
+
+      - name: Run Neve ticket checker
+        env:
+          NEVE_TICKET_URL: https://neve-schechter.org.il/product/moadon-64/
+          NEVE_ALERT_ON_FIRST_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.alert_on_first_run }}
+          SMTP_HOST:    ${{ secrets.SMTP_HOST }}
+          SMTP_PORT:    ${{ secrets.SMTP_PORT }}
+          SMTP_USER:    ${{ secrets.SMTP_USER }}
+          SMTP_PASS:    ${{ secrets.SMTP_PASS }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        run: node check-neve-tickets.js
