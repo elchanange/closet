@@ -1,6 +1,7 @@
 # ============================================================================
 #  Neve Schechter Ticket Checker - GitHub Actions Workflow
 # ============================================================================
+#  DISABLED: Scheduled workflow has been disabled.
 #  Runs every 5 minutes via cron and can also be started manually.
 #
 #  Required Repository Secrets:
@@ -14,9 +15,10 @@
 name: Check Neve Tickets
 
 on:
-  schedule:
-    # GitHub Actions' practical minimum cadence is every 5 minutes.
-    - cron: '*/5 * * * *'
+  # DISABLED: schedule trigger removed
+  # schedule:
+  #   # GitHub Actions' practical minimum cadence is every 5 minutes.
+  #   - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
       alert_on_first_run:
